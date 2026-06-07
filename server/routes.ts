@@ -5,6 +5,23 @@ import { api } from "@shared/routes";
 import { z } from "zod";
 import { db } from "./db";
 import { cities } from "@shared/schema";
+import bcrypt from "bcrypt";
+
+const SALT_ROUNDS = 10;
+
+function requireAuth(req: any, res: any, next: any) {
+  if (!req.session?.userId) {
+    return res.status(401).json({ message: "Unauthorized. Please log in." });
+  }
+  next();
+}
+
+function requireAdmin(req: any, res: any, next: any) {
+  if (!req.session?.userId || req.session?.userRole !== "admin") {
+    return res.status(403).json({ message: "Forbidden. Admin access required." });
+  }
+  next();
+}
 
 export async function registerRoutes(
   httpServer: Server,
@@ -319,6 +336,41 @@ export async function registerRoutes(
     }
   });
 
+  // Cancel booking
+  app.patch(api.bookings.cancel.path, async (req, res) => {
+    try {
+      const booking = await storage.getBooking(Number(req.params.id));
+      if (!booking) return res.status(404).json({ message: "Booking not found" });
+      if (booking.status === "cancelled") return res.status(400).json({ message: "Already cancelled" });
+      if (booking.status === "completed") return res.status(400).json({ message: "Cannot cancel a completed booking" });
+      const updated = await storage.updateBooking(Number(req.params.id), { status: "cancelled" });
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to cancel booking" });
+    }
+  });
+
+  // Reschedule booking
+  app.patch(api.bookings.reschedule.path, async (req, res) => {
+    try {
+      const { bookingDate } = api.bookings.reschedule.input.parse(req.body);
+      const booking = await storage.getBooking(Number(req.params.id));
+      if (!booking) return res.status(404).json({ message: "Booking not found" });
+      if (booking.status === "cancelled" || booking.status === "completed") {
+        return res.status(400).json({ message: `Cannot reschedule a ${booking.status} booking` });
+      }
+      const newDate = new Date(bookingDate);
+      if (isNaN(newDate.getTime())) return res.status(400).json({ message: "Invalid date" });
+      const updated = await storage.updateBooking(Number(req.params.id), { bookingDate: newDate });
+      res.json(updated);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0].message });
+      }
+      res.status(500).json({ message: "Failed to reschedule booking" });
+    }
+  });
+
   // Gallery
   app.get(api.gallery.list.path, async (req, res) => {
     try {
@@ -433,13 +485,226 @@ export async function registerRoutes(
     }
   });
 
+  // ============================================================
+  // AUTH ROUTES (Phase 2)
+  // ============================================================
+
+  app.post(api.auth.register.path, async (req, res) => {
+    try {
+      const input = api.auth.register.input.parse(req.body);
+      const existing = await storage.getUserByEmail(input.email);
+      if (existing) {
+        return res.status(400).json({ message: "Email already registered" });
+      }
+      const passwordHash = await bcrypt.hash(input.password, SALT_ROUNDS);
+      const user = await storage.createUser(input.email, passwordHash, input.name, input.phone);
+      req.session.userId = user.id;
+      req.session.userRole = user.role;
+      const { passwordHash: _ph, ...safeUser } = user;
+      res.status(201).json(safeUser);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0].message });
+      }
+      res.status(500).json({ message: "Failed to register" });
+    }
+  });
+
+  app.post(api.auth.login.path, async (req, res) => {
+    try {
+      const input = api.auth.login.input.parse(req.body);
+      const user = await storage.getUserByEmail(input.email);
+      if (!user) {
+        return res.status(401).json({ message: "Invalid email or password" });
+      }
+      const match = await bcrypt.compare(input.password, user.passwordHash);
+      if (!match) {
+        return res.status(401).json({ message: "Invalid email or password" });
+      }
+      req.session.userId = user.id;
+      req.session.userRole = user.role;
+      const { passwordHash: _ph, ...safeUser } = user;
+      res.json(safeUser);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0].message });
+      }
+      res.status(500).json({ message: "Failed to login" });
+    }
+  });
+
+  app.post(api.auth.logout.path, (req, res) => {
+    req.session.destroy(() => {
+      res.json({ message: "Logged out" });
+    });
+  });
+
+  app.get(api.auth.me.path, async (req, res) => {
+    try {
+      if (!req.session?.userId) {
+        return res.status(401).json({ message: "Not authenticated" });
+      }
+      const user = await storage.getUserById(req.session.userId);
+      if (!user) {
+        req.session.destroy(() => {});
+        return res.status(401).json({ message: "Not authenticated" });
+      }
+      const { passwordHash: _ph, ...safeUser } = user;
+      res.json(safeUser);
+    } catch {
+      res.status(500).json({ message: "Failed to get user" });
+    }
+  });
+
+  // ============================================================
+  // REVIEWS ROUTES (Phase 2)
+  // ============================================================
+
+  app.get(api.reviews.list.path, async (req, res) => {
+    try {
+      const parlourId = Number(req.query.parlourId);
+      if (!parlourId) return res.status(400).json({ message: "parlourId is required" });
+      const reviewList = await storage.getReviews(parlourId);
+      res.json(reviewList);
+    } catch {
+      res.status(500).json({ message: "Failed to fetch reviews" });
+    }
+  });
+
+  app.post(api.reviews.create.path, requireAuth, async (req, res) => {
+    try {
+      const input = api.reviews.create.input.parse(req.body);
+      const userId = req.session.userId!;
+      const existing = await storage.getReviewByUserAndParlour(userId, input.parlourId);
+      if (existing) {
+        return res.status(400).json({ message: "You have already reviewed this parlour" });
+      }
+      const review = await storage.createReview({
+        parlourId: input.parlourId,
+        userId,
+        rating: input.rating,
+        comment: input.comment ?? null,
+      });
+      res.status(201).json(review);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0].message });
+      }
+      res.status(500).json({ message: "Failed to create review" });
+    }
+  });
+
+  app.delete(api.reviews.delete.path, requireAuth, async (req, res) => {
+    try {
+      await storage.deleteReview(Number(req.params.id));
+      res.status(204).send();
+    } catch {
+      res.status(500).json({ message: "Failed to delete review" });
+    }
+  });
+
+  // ============================================================
+  // FAVORITES ROUTES (Phase 2)
+  // ============================================================
+
+  app.get(api.favorites.list.path, requireAuth, async (req, res) => {
+    try {
+      const favs = await storage.getFavorites(req.session.userId!);
+      res.json(favs);
+    } catch {
+      res.status(500).json({ message: "Failed to fetch favorites" });
+    }
+  });
+
+  app.post(api.favorites.toggle.path, requireAuth, async (req, res) => {
+    try {
+      const { parlourId } = api.favorites.toggle.input.parse(req.body);
+      const userId = req.session.userId!;
+      const existing = await storage.getFavorite(userId, parlourId);
+      if (existing) {
+        await storage.removeFavorite(userId, parlourId);
+        res.json({ favorited: false });
+      } else {
+        await storage.addFavorite(userId, parlourId);
+        res.json({ favorited: true });
+      }
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0].message });
+      }
+      res.status(500).json({ message: "Failed to toggle favorite" });
+    }
+  });
+
+  // ============================================================
+  // ADMIN ROUTES (Phase 2)
+  // ============================================================
+
+  app.get(api.admin.stats.path, requireAdmin, async (req, res) => {
+    try {
+      const stats = await storage.getAdminStats();
+      res.json(stats);
+    } catch {
+      res.status(500).json({ message: "Failed to fetch stats" });
+    }
+  });
+
+  app.get(api.admin.users.path, requireAdmin, async (req, res) => {
+    try {
+      const allUsers = await storage.getAllUsers();
+      res.json(allUsers);
+    } catch {
+      res.status(500).json({ message: "Failed to fetch users" });
+    }
+  });
+
+  app.put(api.admin.updateUser.path, requireAdmin, async (req, res) => {
+    try {
+      const input = api.admin.updateUser.input.parse(req.body);
+      const updated = await storage.updateUser(Number(req.params.id), input as any);
+      const { passwordHash: _ph, ...safeUser } = updated;
+      res.json(safeUser);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0].message });
+      }
+      res.status(500).json({ message: "Failed to update user" });
+    }
+  });
+
+  app.delete(api.admin.deleteUser.path, requireAdmin, async (req, res) => {
+    try {
+      await storage.deleteUser(Number(req.params.id));
+      res.status(204).send();
+    } catch {
+      res.status(500).json({ message: "Failed to delete user" });
+    }
+  });
+
+  app.get(api.admin.parlours.path, requireAdmin, async (req, res) => {
+    try {
+      const parlours = await storage.getParlours();
+      res.json(parlours);
+    } catch {
+      res.status(500).json({ message: "Failed to fetch parlours" });
+    }
+  });
+
+  app.get(api.admin.bookings.path, requireAdmin, async (req, res) => {
+    try {
+      const bookings = await storage.getBookings();
+      res.json(bookings);
+    } catch {
+      res.status(500).json({ message: "Failed to fetch bookings" });
+    }
+  });
+
   return httpServer;
 }
 
 // Seed database with demo data
 export async function seedDatabase() {
   try {
-    // Check if cities already exist
     const existingCities = await storage.getCities();
     if (existingCities.length > 0) {
       console.log("Database already seeded");
@@ -448,7 +713,6 @@ export async function seedDatabase() {
 
     console.log("Seeding database...");
 
-    // Create cities
     const cityData = [
       { name: "Nellore", state: "Andhra Pradesh" },
       { name: "Hyderabad", state: "Telangana" },
@@ -461,9 +725,8 @@ export async function seedDatabase() {
     const createdCities = await db.insert(cities).values(cityData).returning();
     console.log(`Created ${createdCities.length} cities`);
 
-    // For each city, create 5-7 parlours
     const parlourNames = [
-      "Glamour Studio", "Beauty Haven", "Style Lounge", "Radiance Spa", 
+      "Glamour Studio", "Beauty Haven", "Style Lounge", "Radiance Spa",
       "Elite Beauty", "Crown Beauty Palace", "Divine Touch"
     ];
 
@@ -491,7 +754,7 @@ export async function seedDatabase() {
     };
 
     const staffSpecializations = [
-      "Hair Styling", "Makeup Artist", "Skincare Specialist", 
+      "Hair Styling", "Makeup Artist", "Skincare Specialist",
       "Nail Technician", "Bridal Specialist", "Color Expert"
     ];
 
@@ -523,7 +786,6 @@ export async function seedDatabase() {
           imageUrl: `https://images.unsplash.com/photo-1560066984-138dadb4c035?w=800`,
         });
 
-        // Add services for this parlour
         const categories = Object.keys(serviceCategories);
         for (const category of categories) {
           const categoryServices = serviceCategories[category as keyof typeof serviceCategories];
@@ -539,7 +801,6 @@ export async function seedDatabase() {
           }
         }
 
-        // Add staff for this parlour (3-5 staff members)
         const numStaff = 3 + Math.floor(Math.random() * 3);
         for (let k = 0; k < numStaff; k++) {
           const staffName = staffNames[k % staffNames.length];
@@ -563,7 +824,6 @@ export async function seedDatabase() {
           });
         }
 
-        // Add demo bookings (2-3 per parlour)
         const services = await storage.getServices(parlour.id);
         const staff = await storage.getStaff({ parlourId: parlour.id });
 
@@ -586,7 +846,6 @@ export async function seedDatabase() {
           });
         }
 
-        // Add gallery images (3-5 per parlour)
         const numGalleryImages = 3 + Math.floor(Math.random() * 3);
         for (let g = 0; g < numGalleryImages; g++) {
           await storage.createGalleryImage({

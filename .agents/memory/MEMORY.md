@@ -1,0 +1,3 @@
+- [Phase 2 auth architecture](phase2-auth.md) — bcrypt+express-session auth; SESSION_SECRET env var already set; users/reviews/favorites tables added additively.
+- [Owner login pattern](owner-login.md) — owner login uses parlourOwnerCode field + localStorage `beauty.ownerSession`; separate from user auth sessions.
+- [Seeded parlour IDs](seed-ids.md) — parlour IDs start around 9+, not from 1; cities seeded once on first startup.

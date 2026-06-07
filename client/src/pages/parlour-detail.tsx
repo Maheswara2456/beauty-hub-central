@@ -3,29 +3,130 @@ import { useParams, Link, useLocation } from "wouter";
 import { PageShell, SectionHeader } from "@/components/shell";
 import { useParlour } from "@/hooks/use-parlours";
 import { useGallery } from "@/hooks/use-gallery";
+import { useReviews, useCreateReview, useDeleteReview } from "@/hooks/use-reviews";
+import { useCurrentUser } from "@/hooks/use-auth";
+import { useToggleFavorite, useFavorites } from "@/hooks/use-favorites";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { MapPin, Star, CalendarDays, Users, Images, ArrowLeft, Phone, Mail } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
+import { MapPin, Star, CalendarDays, Users, Images, ArrowLeft, Phone, Mail, Heart, Trash2, Send } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
+import { useToast } from "@/hooks/use-toast";
 
 function ratingNumber(v: any) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 }
 
+function formatDate(d: any) {
+  try {
+    return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(d));
+  } catch {
+    return String(d ?? "");
+  }
+}
+
+function StarRating({ value, onChange }: { value: number; onChange: (n: number) => void }) {
+  const [hovered, setHovered] = React.useState(0);
+  return (
+    <div className="flex gap-1">
+      {[1, 2, 3, 4, 5].map((n) => (
+        <button
+          key={n}
+          type="button"
+          onClick={() => onChange(n)}
+          onMouseEnter={() => setHovered(n)}
+          onMouseLeave={() => setHovered(0)}
+          className="transition-transform hover:scale-110"
+          data-testid={`star-${n}`}
+        >
+          <Star
+            className={`h-6 w-6 ${(hovered || value) >= n ? "fill-yellow-400 text-yellow-400" : "text-muted-foreground"}`}
+          />
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export default function ParlourDetailPage() {
   const params = useParams<{ id: string }>();
   const id = Number(params.id);
   const [, setLocation] = useLocation();
+  const { toast } = useToast();
 
   const { data, isLoading, error, refetch } = useParlour(id);
   const parlour = data as any;
 
   const { data: gallery } = useGallery(Number(parlour?.id ?? id));
+  const { data: reviews, isLoading: reviewsLoading } = useReviews(id);
+  const createReview = useCreateReview();
+  const deleteReview = useDeleteReview();
+  const { data: me } = useCurrentUser();
+  const toggleFav = useToggleFavorite();
+  const { data: favs } = useFavorites();
+
+  const isFavorited = React.useMemo(() => {
+    if (!favs || !Array.isArray(favs)) return false;
+    return (favs as any[]).some((f) => f.parlourId === id);
+  }, [favs, id]);
+
+  const [rating, setRating] = React.useState(5);
+  const [comment, setComment] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+
+  const alreadyReviewed = React.useMemo(() => {
+    if (!me || !reviews) return false;
+    return (reviews as any[]).some((r: any) => r.userId === me.id);
+  }, [me, reviews]);
 
   const cover = (parlour?.imageUrl as string | null | undefined) || "";
+
+  const handleToggleFavorite = async () => {
+    if (!me) {
+      toast({ title: "Sign in required", description: "Please sign in to save favourites.", variant: "destructive" });
+      return;
+    }
+    try {
+      const result = await toggleFav.mutateAsync(id);
+      toast({ title: result.favorited ? "Added to favourites" : "Removed from favourites" });
+    } catch (e) {
+      toast({ title: "Error", description: (e as Error).message, variant: "destructive" });
+    }
+  };
+
+  const handleSubmitReview = async () => {
+    if (!me) {
+      toast({ title: "Sign in required", description: "Please sign in to leave a review.", variant: "destructive" });
+      return;
+    }
+    if (rating < 1) {
+      toast({ title: "Please select a rating", variant: "destructive" });
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await createReview.mutateAsync({ parlourId: id, rating, comment: comment || undefined });
+      toast({ title: "Review posted!", description: "Thank you for your feedback." });
+      setComment("");
+      setRating(5);
+    } catch (e) {
+      toast({ title: "Failed to post review", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleDeleteReview = async (reviewId: number) => {
+    try {
+      await deleteReview.mutateAsync({ id: reviewId, parlourId: id });
+      toast({ title: "Review deleted" });
+    } catch (e) {
+      toast({ title: "Error", description: (e as Error).message, variant: "destructive" });
+    }
+  };
 
   return (
     <PageShell>
@@ -42,8 +143,16 @@ export default function ParlourDetailPage() {
               Back
             </Link>
             <Button
-              onClick={() => setLocation(`/book/parlour/${id}`)}
+              variant="ghost"
+              size="icon"
+              onClick={handleToggleFavorite}
+              disabled={toggleFav.isPending}
+              data-testid="button-favorite"
+              className={isFavorited ? "text-rose-500 hover:text-rose-600" : "text-muted-foreground hover:text-rose-400"}
             >
+              <Heart className={`h-5 w-5 ${isFavorited ? "fill-current" : ""}`} />
+            </Button>
+            <Button onClick={() => setLocation(`/book/parlour/${id}`)}>
               <CalendarDays className="h-4 w-4 mr-2" />
               Book now
             </Button>
@@ -68,7 +177,7 @@ export default function ParlourDetailPage() {
         <div className="mt-6">
           <EmptyState
             icon={MapPin}
-            title="Couldn’t load parlour"
+            title="Couldn't load parlour"
             description={(error as Error).message}
             actionLabel="Try again"
             onAction={() => refetch()}
@@ -76,7 +185,7 @@ export default function ParlourDetailPage() {
         </div>
       ) : !parlour ? (
         <div className="mt-6">
-          <EmptyState icon={MapPin} title="Not found" description="This parlour doesn’t exist." />
+          <EmptyState icon={MapPin} title="Not found" description="This parlour doesn't exist." />
         </div>
       ) : (
         <div className="mt-6 grid grid-cols-1 lg:grid-cols-12 gap-6 animate-float-in">
@@ -86,7 +195,6 @@ export default function ParlourDetailPage() {
                 <div className="relative">
                   {cover ? (
                     <>
-                      {/* parlour cover image */}
                       <img
                         src={cover}
                         alt={`${parlour.name} cover`}
@@ -211,6 +319,94 @@ export default function ParlourDetailPage() {
                 ) : null}
               </div>
             </Card>
+
+            {/* Reviews Section */}
+            <Card className="glass noise-overlay p-5 md:p-6">
+              <div className="flex items-center justify-between gap-2 flex-wrap mb-4">
+                <div>
+                  <h2 className="text-xl md:text-2xl inline-flex items-center gap-2">
+                    <Star className="h-5 w-5" />
+                    Reviews
+                  </h2>
+                  <p className="text-sm text-muted-foreground">
+                    {(reviews as any[])?.length ?? 0} review{(reviews as any[])?.length !== 1 ? "s" : ""}
+                  </p>
+                </div>
+              </div>
+
+              {/* Write a review */}
+              {me && !alreadyReviewed ? (
+                <div className="mb-5 rounded-xl border bg-card/60 p-4">
+                  <div className="text-sm font-semibold mb-3">Write a review</div>
+                  <div className="mb-3">
+                    <StarRating value={rating} onChange={setRating} />
+                  </div>
+                  <Textarea
+                    placeholder="Share your experience (optional)..."
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                    className="resize-none mb-3"
+                    rows={3}
+                    data-testid="input-review-comment"
+                  />
+                  <Button onClick={handleSubmitReview} disabled={submitting || createReview.isPending} data-testid="button-submit-review">
+                    <Send className="h-4 w-4 mr-2" />
+                    {submitting ? "Posting..." : "Post review"}
+                  </Button>
+                </div>
+              ) : me && alreadyReviewed ? (
+                <div className="mb-5 rounded-xl border bg-card/60 p-3 text-sm text-muted-foreground">
+                  You've already reviewed this parlour.
+                </div>
+              ) : (
+                <div className="mb-5 rounded-xl border bg-card/60 p-3 text-sm text-muted-foreground">
+                  <Link href="/login" className="font-semibold text-foreground hover:underline">Sign in</Link> to leave a review.
+                </div>
+              )}
+
+              {reviewsLoading ? (
+                <div className="space-y-3">
+                  {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-20 rounded-xl" />)}
+                </div>
+              ) : !reviews || (reviews as any[]).length === 0 ? (
+                <div className="text-sm text-muted-foreground">No reviews yet. Be the first!</div>
+              ) : (
+                <div className="space-y-3">
+                  {(reviews as any[]).map((r: any) => (
+                    <div key={r.id} className="rounded-xl border bg-card/60 p-4">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-semibold text-sm">{r.user?.name ?? "User"}</span>
+                            <span className="flex items-center gap-0.5 text-yellow-500">
+                              {Array.from({ length: r.rating }).map((_, i) => (
+                                <Star key={i} className="h-3.5 w-3.5 fill-current" />
+                              ))}
+                            </span>
+                            <span className="text-xs text-muted-foreground">{formatDate(r.createdAt)}</span>
+                          </div>
+                          {r.comment ? (
+                            <p className="mt-1.5 text-sm text-muted-foreground leading-relaxed">{r.comment}</p>
+                          ) : null}
+                        </div>
+                        {me && (me.id === r.userId || me.role === "admin") ? (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-muted-foreground hover:text-destructive flex-shrink-0"
+                            onClick={() => handleDeleteReview(r.id)}
+                            disabled={deleteReview.isPending}
+                            data-testid={`button-delete-review-${r.id}`}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
           </div>
 
           <div className="lg:col-span-4 space-y-6">
@@ -235,6 +431,15 @@ export default function ParlourDetailPage() {
                 <Button onClick={() => setLocation(`/book/parlour/${id}`)}>
                   <CalendarDays className="h-4 w-4 mr-2" />
                   Book appointment
+                </Button>
+                <Button
+                  variant={isFavorited ? "secondary" : "outline"}
+                  onClick={handleToggleFavorite}
+                  disabled={toggleFav.isPending}
+                  data-testid="button-favorite-sidebar"
+                >
+                  <Heart className={`h-4 w-4 mr-2 ${isFavorited ? "fill-rose-500 text-rose-500" : ""}`} />
+                  {isFavorited ? "Saved to favourites" : "Save to favourites"}
                 </Button>
                 <Link
                   href="/bookings"

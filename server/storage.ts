@@ -7,6 +7,9 @@ import {
   bookings,
   galleryImages,
   beautyPosts,
+  users,
+  reviews,
+  favorites,
   type City,
   type Parlour,
   type Service,
@@ -14,6 +17,9 @@ import {
   type Booking,
   type GalleryImage,
   type BeautyPost,
+  type User,
+  type Review,
+  type Favorite,
   type CreateParlourRequest,
   type UpdateParlourRequest,
   type CreateServiceRequest,
@@ -24,15 +30,20 @@ import {
   type UpdateBookingRequest,
   type CreateGalleryImageRequest,
   type CreateBeautyPostRequest,
+  type CreateReviewRequest,
+  type UpdateUserRequest,
   type ParlourWithDetails,
   type BookingWithDetails,
   type StaffWithDetails,
+  type ReviewWithUser,
+  type FavoriteWithParlour,
   type ParloursQueryParams,
   type StaffQueryParams,
   type OwnerLoginRequest,
   type OwnerLoginResponse,
+  type UserPublic,
 } from "@shared/schema";
-import { eq, and, gte, lte, desc, asc, sql } from "drizzle-orm";
+import { eq, and, gte, lte, desc, asc, sql, ne } from "drizzle-orm";
 
 export interface IStorage {
   // Cities
@@ -77,6 +88,35 @@ export interface IStorage {
   createBeautyPost(post: CreateBeautyPostRequest): Promise<BeautyPost>;
   deleteBeautyPost(id: number): Promise<void>;
   likeBeautyPost(id: number): Promise<BeautyPost>;
+
+  // Users (Phase 2)
+  getUserByEmail(email: string): Promise<User | undefined>;
+  getUserById(id: number): Promise<User | undefined>;
+  createUser(email: string, passwordHash: string, name: string, phone?: string, role?: string, parlourId?: number): Promise<User>;
+  updateUser(id: number, updates: UpdateUserRequest): Promise<User>;
+  deleteUser(id: number): Promise<void>;
+  getAllUsers(): Promise<UserPublic[]>;
+
+  // Reviews (Phase 2)
+  getReviews(parlourId: number): Promise<ReviewWithUser[]>;
+  getReviewByUserAndParlour(userId: number, parlourId: number): Promise<Review | undefined>;
+  createReview(review: CreateReviewRequest): Promise<Review>;
+  deleteReview(id: number): Promise<void>;
+
+  // Favorites (Phase 2)
+  getFavorites(userId: number): Promise<FavoriteWithParlour[]>;
+  getFavorite(userId: number, parlourId: number): Promise<Favorite | undefined>;
+  addFavorite(userId: number, parlourId: number): Promise<Favorite>;
+  removeFavorite(userId: number, parlourId: number): Promise<void>;
+
+  // Admin (Phase 2)
+  getAdminStats(): Promise<{
+    totalUsers: number;
+    totalParlours: number;
+    totalBookings: number;
+    totalReviews: number;
+    bookingsByStatus: Record<string, number>;
+  }>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -325,6 +365,164 @@ export class DatabaseStorage implements IStorage {
       .where(eq(beautyPosts.id, id))
       .returning();
     return updated;
+  }
+
+  // Users (Phase 2)
+  async getUserByEmail(email: string): Promise<User | undefined> {
+    const result = await db.select().from(users).where(eq(users.email, email));
+    return result[0];
+  }
+
+  async getUserById(id: number): Promise<User | undefined> {
+    const result = await db.select().from(users).where(eq(users.id, id));
+    return result[0];
+  }
+
+  async createUser(email: string, passwordHash: string, name: string, phone?: string, role?: string, parlourId?: number): Promise<User> {
+    const [created] = await db.insert(users).values({
+      email,
+      passwordHash,
+      name,
+      phone: phone ?? null,
+      role: role ?? "user",
+      parlourId: parlourId ?? null,
+    }).returning();
+    return created;
+  }
+
+  async updateUser(id: number, updates: UpdateUserRequest): Promise<User> {
+    const [updated] = await db.update(users)
+      .set(updates as any)
+      .where(eq(users.id, id))
+      .returning();
+    return updated;
+  }
+
+  async deleteUser(id: number): Promise<void> {
+    await db.delete(users).where(eq(users.id, id));
+  }
+
+  async getAllUsers(): Promise<UserPublic[]> {
+    const result = await db.select({
+      id: users.id,
+      email: users.email,
+      name: users.name,
+      phone: users.phone,
+      role: users.role,
+      parlourId: users.parlourId,
+      createdAt: users.createdAt,
+    }).from(users).orderBy(desc(users.createdAt));
+    return result as UserPublic[];
+  }
+
+  // Reviews (Phase 2)
+  async getReviews(parlourId: number): Promise<ReviewWithUser[]> {
+    const result = await db.query.reviews.findMany({
+      where: eq(reviews.parlourId, parlourId),
+      with: {
+        user: {
+          columns: { id: true, name: true },
+        },
+      },
+      orderBy: desc(reviews.createdAt),
+    });
+    return result as ReviewWithUser[];
+  }
+
+  async getReviewByUserAndParlour(userId: number, parlourId: number): Promise<Review | undefined> {
+    const result = await db.select().from(reviews)
+      .where(and(eq(reviews.userId, userId), eq(reviews.parlourId, parlourId)));
+    return result[0];
+  }
+
+  async createReview(review: CreateReviewRequest): Promise<Review> {
+    const [created] = await db.insert(reviews).values(review).returning();
+
+    // Recompute parlour rating from all reviews
+    const allReviews = await db.select({ rating: reviews.rating })
+      .from(reviews)
+      .where(eq(reviews.parlourId, review.parlourId));
+
+    const total = allReviews.length;
+    const avg = total > 0
+      ? (allReviews.reduce((sum, r) => sum + r.rating, 0) / total).toFixed(2)
+      : "0.00";
+
+    await db.update(parlours)
+      .set({ rating: avg, totalReviews: total })
+      .where(eq(parlours.id, review.parlourId));
+
+    return created;
+  }
+
+  async deleteReview(id: number): Promise<void> {
+    const [rev] = await db.select().from(reviews).where(eq(reviews.id, id));
+    await db.delete(reviews).where(eq(reviews.id, id));
+
+    if (rev) {
+      const allReviews = await db.select({ rating: reviews.rating })
+        .from(reviews)
+        .where(eq(reviews.parlourId, rev.parlourId));
+      const total = allReviews.length;
+      const avg = total > 0
+        ? (allReviews.reduce((sum, r) => sum + r.rating, 0) / total).toFixed(2)
+        : "0.00";
+      await db.update(parlours)
+        .set({ rating: avg, totalReviews: total })
+        .where(eq(parlours.id, rev.parlourId));
+    }
+  }
+
+  // Favorites (Phase 2)
+  async getFavorites(userId: number): Promise<FavoriteWithParlour[]> {
+    const result = await db.query.favorites.findMany({
+      where: eq(favorites.userId, userId),
+      with: { parlour: true },
+      orderBy: desc(favorites.createdAt),
+    });
+    return result as FavoriteWithParlour[];
+  }
+
+  async getFavorite(userId: number, parlourId: number): Promise<Favorite | undefined> {
+    const result = await db.select().from(favorites)
+      .where(and(eq(favorites.userId, userId), eq(favorites.parlourId, parlourId)));
+    return result[0];
+  }
+
+  async addFavorite(userId: number, parlourId: number): Promise<Favorite> {
+    const [created] = await db.insert(favorites).values({ userId, parlourId }).returning();
+    return created;
+  }
+
+  async removeFavorite(userId: number, parlourId: number): Promise<void> {
+    await db.delete(favorites)
+      .where(and(eq(favorites.userId, userId), eq(favorites.parlourId, parlourId)));
+  }
+
+  // Admin stats (Phase 2)
+  async getAdminStats() {
+    const [userCount] = await db.select({ count: sql<number>`count(*)::int` }).from(users);
+    const [parlourCount] = await db.select({ count: sql<number>`count(*)::int` }).from(parlours);
+    const [bookingCount] = await db.select({ count: sql<number>`count(*)::int` }).from(bookings);
+    const [reviewCount] = await db.select({ count: sql<number>`count(*)::int` }).from(reviews);
+
+    const statusRows = await db.select({
+      status: bookings.status,
+      count: sql<number>`count(*)::int`,
+    }).from(bookings).groupBy(bookings.status);
+
+    const bookingsByStatus: Record<string, number> = {};
+    for (const row of statusRows) {
+      bookingsByStatus[row.status] = row.count;
+    }
+
+    return {
+      totalUsers: userCount.count,
+      totalParlours: parlourCount.count,
+      totalBookings: bookingCount.count,
+      totalReviews: reviewCount.count,
+      bookingsByStatus,
+    };
   }
 }
 

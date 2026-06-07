@@ -18,6 +18,10 @@ import OwnerEntryPage from "@/pages/owner";
 import OwnerLoginPage from "@/pages/owner-login";
 import OwnerDashboardPage from "@/pages/owner-dashboard";
 import StaffProfilePage from "@/pages/staff-profile";
+import LoginPage from "@/pages/login";
+import RegisterPage from "@/pages/register";
+import FavoritesPage from "@/pages/favorites";
+import AdminDashboardPage from "@/pages/admin-dashboard";
 
 function Router() {
   return (
@@ -30,12 +34,18 @@ function Router() {
       <Route path="/book/confirmation/:id" component={BookingConfirmationPage} />
 
       <Route path="/bookings" component={UserBookingsPage} />
+      <Route path="/favorites" component={FavoritesPage} />
 
       <Route path="/owner" component={OwnerEntryPage} />
       <Route path="/owner/login" component={OwnerLoginPage} />
       <Route path="/owner/dashboard" component={OwnerDashboardPage} />
 
       <Route path="/staff/:id" component={StaffProfilePage} />
+
+      <Route path="/login" component={LoginPage} />
+      <Route path="/register" component={RegisterPage} />
+
+      <Route path="/admin" component={AdminDashboardPage} />
 
       <Route component={NotFound} />
     </Switch>

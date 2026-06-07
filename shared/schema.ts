@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, decimal, boolean, timestamp, serial } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, decimal, boolean, timestamp, serial, uniqueIndex } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -88,6 +88,35 @@ export const beautyPosts = pgTable("beauty_posts", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// === PHASE 2 TABLES ===
+
+export const users = pgTable("users", {
+  id: serial("id").primaryKey(),
+  email: text("email").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  name: text("name").notNull(),
+  phone: text("phone"),
+  role: text("role").notNull().default("user"),
+  parlourId: integer("parlour_id").references(() => parlours.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const reviews = pgTable("reviews", {
+  id: serial("id").primaryKey(),
+  parlourId: integer("parlour_id").notNull().references(() => parlours.id, { onDelete: "cascade" }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  rating: integer("rating").notNull(),
+  comment: text("comment"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const favorites = pgTable("favorites", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  parlourId: integer("parlour_id").notNull().references(() => parlours.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 // === RELATIONS ===
 
 export const citiesRelations = relations(cities, ({ many }) => ({
@@ -103,6 +132,8 @@ export const parloursRelations = relations(parlours, ({ one, many }) => ({
   staff: many(staff),
   bookings: many(bookings),
   galleryImages: many(galleryImages),
+  reviews: many(reviews),
+  favorites: many(favorites),
 }));
 
 export const servicesRelations = relations(services, ({ one, many }) => ({
@@ -151,6 +182,37 @@ export const beautyPostsRelations = relations(beautyPosts, ({ one }) => ({
   }),
 }));
 
+export const usersRelations = relations(users, ({ one, many }) => ({
+  parlour: one(parlours, {
+    fields: [users.parlourId],
+    references: [parlours.id],
+  }),
+  reviews: many(reviews),
+  favorites: many(favorites),
+}));
+
+export const reviewsRelations = relations(reviews, ({ one }) => ({
+  parlour: one(parlours, {
+    fields: [reviews.parlourId],
+    references: [parlours.id],
+  }),
+  user: one(users, {
+    fields: [reviews.userId],
+    references: [users.id],
+  }),
+}));
+
+export const favoritesRelations = relations(favorites, ({ one }) => ({
+  user: one(users, {
+    fields: [favorites.userId],
+    references: [users.id],
+  }),
+  parlour: one(parlours, {
+    fields: [favorites.parlourId],
+    references: [parlours.id],
+  }),
+}));
+
 // === BASE SCHEMAS ===
 
 export const insertCitySchema = createInsertSchema(cities).omit({ id: true });
@@ -160,6 +222,9 @@ export const insertStaffSchema = createInsertSchema(staff).omit({ id: true, crea
 export const insertBookingSchema = createInsertSchema(bookings).omit({ id: true, createdAt: true });
 export const insertGalleryImageSchema = createInsertSchema(galleryImages).omit({ id: true, createdAt: true });
 export const insertBeautyPostSchema = createInsertSchema(beautyPosts).omit({ id: true, createdAt: true, likes: true });
+export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true });
+export const insertReviewSchema = createInsertSchema(reviews).omit({ id: true, createdAt: true });
+export const insertFavoriteSchema = createInsertSchema(favorites).omit({ id: true, createdAt: true });
 
 // === EXPLICIT API CONTRACT TYPES ===
 
@@ -171,6 +236,9 @@ export type Staff = typeof staff.$inferSelect;
 export type Booking = typeof bookings.$inferSelect;
 export type GalleryImage = typeof galleryImages.$inferSelect;
 export type BeautyPost = typeof beautyPosts.$inferSelect;
+export type User = typeof users.$inferSelect;
+export type Review = typeof reviews.$inferSelect;
+export type Favorite = typeof favorites.$inferSelect;
 
 // Insert types
 export type InsertCity = z.infer<typeof insertCitySchema>;
@@ -180,6 +248,9 @@ export type InsertStaff = z.infer<typeof insertStaffSchema>;
 export type InsertBooking = z.infer<typeof insertBookingSchema>;
 export type InsertGalleryImage = z.infer<typeof insertGalleryImageSchema>;
 export type InsertBeautyPost = z.infer<typeof insertBeautyPostSchema>;
+export type InsertUser = z.infer<typeof insertUserSchema>;
+export type InsertReview = z.infer<typeof insertReviewSchema>;
+export type InsertFavorite = z.infer<typeof insertFavoriteSchema>;
 
 // Request types
 export type CreateParlourRequest = InsertParlour;
@@ -192,6 +263,9 @@ export type CreateBookingRequest = InsertBooking;
 export type UpdateBookingRequest = Partial<InsertBooking>;
 export type CreateGalleryImageRequest = InsertGalleryImage;
 export type CreateBeautyPostRequest = InsertBeautyPost;
+export type CreateUserRequest = { email: string; password: string; name: string; phone?: string; role?: string; parlourId?: number };
+export type CreateReviewRequest = InsertReview;
+export type UpdateUserRequest = Partial<{ name: string; phone: string; role: string; parlourId: number | null }>;
 
 // Response types with related data
 export interface ParlourWithDetails extends Parlour {
@@ -212,6 +286,14 @@ export interface StaffWithDetails extends Staff {
   posts: BeautyPost[];
 }
 
+export interface ReviewWithUser extends Review {
+  user: Pick<User, "id" | "name">;
+}
+
+export interface FavoriteWithParlour extends Favorite {
+  parlour: Parlour;
+}
+
 // Response types
 export type CityResponse = City;
 export type ParlourResponse = Parlour;
@@ -223,6 +305,7 @@ export type BookingResponse = Booking;
 export type BookingDetailResponse = BookingWithDetails;
 export type GalleryImageResponse = GalleryImage;
 export type BeautyPostResponse = BeautyPost;
+export type UserPublic = Omit<User, "passwordHash">;
 
 // Query/filter types
 export interface ParloursQueryParams {
